@@ -19,6 +19,25 @@ const s3 = new AWS.S3({
 
 router.post('/upload', upload.single('resume'), async (req, res) => {
   try {
+    // Debug: log file storage metadata and whether S3 env vars are present
+    try {
+      const fileInfo = req.file
+        ? {
+            key: req.file.key || null,
+            location: req.file.location || null,
+            path: req.file.path || null,
+            originalname: req.file.originalname || null,
+          }
+        : null;
+      console.log('DEBUG upload req.file =>', fileInfo);
+      console.log('DEBUG S3 env present =>', {
+        S3_BUCKET: !!process.env.S3_BUCKET,
+        AWS_KEY: !!process.env.AWS_ACCESS_KEY_ID,
+        AWS_SECRET: !!process.env.AWS_SECRET_ACCESS_KEY,
+      });
+    } catch (dErr) {
+      console.log('DEBUG upload logging error', dErr && dErr.message);
+    }
     let text;
     let resumePath;
 
