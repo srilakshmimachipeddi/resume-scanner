@@ -12,6 +12,14 @@ app.use(express.json());
 
 app.use("/api/candidates", candidateRoutes);
 
+// Ensure uploads directory exists (fallback for local disk storage)
+const fs = require('fs');
+const path = require('path');
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+	fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 mongoose
 	.connect(process.env.MONGO_URI)
 	.then(() => {
