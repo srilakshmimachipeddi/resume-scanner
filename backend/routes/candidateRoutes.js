@@ -14,8 +14,7 @@ const mongoose = require('mongoose');
 
 router.post('/upload', upload.single('resume'), async (req, res) => {
   try {
-    // Debug: show whether we received a buffer
-    console.log('DEBUG upload req.file keys =>', req.file ? Object.keys(req.file) : null);
+    // receive file buffer
 
     if (!req.file || !req.file.buffer) {
       throw new Error('No file uploaded or missing buffer');
@@ -96,3 +95,105 @@ router.get("/export", async (req, res) => {
 });
 
 module.exports = router;
+
+// Download resume from GridFS by id
+router.get('/resumes/:id', async (req, res) => {
+  try {
+    const id = new mongoose.Types.ObjectId(req.params.id);
+    const db = mongoose.connection.db;
+    const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName: 'resumes' });
+
+    const files = await bucket.find({ _id: id }).toArray();
+    if (!files || files.length === 0) return res.status(404).send('Not found');
+
+    const fileDoc = files[0];
+    res.set('Content-Type', fileDoc.contentType || 'application/pdf');
+    res.set('Content-Disposition', `attachment; filename="${fileDoc.filename}"`);
+
+    const downloadStream = bucket.openDownloadStream(id);
+    downloadStream.on('error', (err) => {
+      console.error('GridFS download error:', err && err.message);
+      res.status(500).end();
+    });
+    downloadStream.pipe(res);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete candidate and associated GridFS file
+router.delete('/candidates/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    const candidate = await Candidate.findById(id);
+    if (!candidate) return res.status(404).json({ error: 'Candidate not found' });
+
+    // If resumePath points to GridFS, delete the file
+    if (candidate.resumePath && candidate.resumePath.startsWith('gridfs:')) {
+      const fileId = candidate.resumePath.split(':')[1];
+      try {
+        const db = mongoose.connection.db;
+        const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName: 'resumes' });
+        await bucket.delete(new mongoose.Types.ObjectId(fileId));
+      } catch (err) {
+        console.error('Failed to delete GridFS file:', err && err.message);
+        // continue to delete candidate record even if file delete fails
+      }
+    }
+
+    await Candidate.findByIdAndDelete(id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk delete: delete all candidates except top N (by score)
+// Usage: DELETE /api/candidates?keep=10   (keeps top 10)
+router.delete('/', async (req, res) => {
+  try {
+    const keep = parseInt(req.query.keep || '0', 10);
+
+    const allCandidates = await Candidate.find().sort({ score: -1 }).select('_id resumePath');
+
+    if (keep <= 0) {
+      // delete everything
+      for (const c of allCandidates) {
+        if (c.resumePath && c.resumePath.startsWith('gridfs:')) {
+          try {
+            const fileId = c.resumePath.split(':')[1];
+            const db = mongoose.connection.db;
+            const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName: 'resumes' });
+            await bucket.delete(new mongoose.Types.ObjectId(fileId));
+          } catch (err) {
+            console.error('GridFS delete error (bulk):', err && err.message);
+          }
+        }
+        await Candidate.findByIdAndDelete(c._id);
+      }
+      return res.json({ ok: true, deleted: allCandidates.length });
+    }
+
+    // keep top `keep` candidates, delete the rest
+    const toKeep = allCandidates.slice(0, keep).map((c) => c._id.toString());
+    const toDelete = allCandidates.slice(keep);
+
+    for (const c of toDelete) {
+      if (c.resumePath && c.resumePath.startsWith('gridfs:')) {
+        try {
+          const fileId = c.resumePath.split(':')[1];
+          const db = mongoose.connection.db;
+          const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName: 'resumes' });
+          await bucket.delete(new mongoose.Types.ObjectId(fileId));
+        } catch (err) {
+          console.error('GridFS delete error (bulk):', err && err.message);
+        }
+      }
+      await Candidate.findByIdAndDelete(c._id);
+    }
+
+    return res.json({ ok: true, kept: toKeep.length, deleted: toDelete.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
