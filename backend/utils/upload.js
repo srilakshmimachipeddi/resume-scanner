@@ -1,25 +1,10 @@
-const AWS = require('aws-sdk');
 const multer = require('multer');
-const multerS3 = require('multer-s3');
 
-const s3 = new AWS.S3({
-	accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-	secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-	region: process.env.S3_REGION,
-});
+// Use memory storage so we can handle the file buffer (store to GridFS)
+const storage = multer.memoryStorage();
 
 const upload = multer({
-	storage: multerS3({
-		s3: s3,
-		bucket: process.env.S3_BUCKET,
-		acl: 'private',
-		metadata: function (req, file, cb) {
-			cb(null, { fieldName: file.fieldname });
-		},
-		key: function (req, file, cb) {
-			cb(null, Date.now().toString() + '-' + file.originalname);
-		},
-	}),
+	storage,
 	limits: { fileSize: 10 * 1024 * 1024 },
 });
 

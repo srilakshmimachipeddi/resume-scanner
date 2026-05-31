@@ -2,7 +2,6 @@ const express = require("express");
 
 const router = express.Router();
 
-const AWS = require('aws-sdk');
 const upload = require('../utils/upload');
 
 const parsePDF = require('../utils/pdfParser');
@@ -11,68 +10,57 @@ const calculateScore = require('../utils/scoreCalculator');
 
 const Candidate = require('../models/Candidate');
 
-const s3 = new AWS.S3({
-  accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-  secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-  region: process.env.S3_REGION,
-});
+const mongoose = require('mongoose');
 
 router.post('/upload', upload.single('resume'), async (req, res) => {
   try {
-    // Debug: log file storage metadata and whether S3 env vars are present
-    try {
-      const fileInfo = req.file
-        ? {
-            key: req.file.key || null,
-            location: req.file.location || null,
-            path: req.file.path || null,
-            originalname: req.file.originalname || null,
-          }
-        : null;
-      console.log('DEBUG upload req.file =>', fileInfo);
-      console.log('DEBUG S3 env present =>', {
-        S3_BUCKET: !!process.env.S3_BUCKET,
-        AWS_KEY: !!process.env.AWS_ACCESS_KEY_ID,
-        AWS_SECRET: !!process.env.AWS_SECRET_ACCESS_KEY,
-      });
-    } catch (dErr) {
-      console.log('DEBUG upload logging error', dErr && dErr.message);
-    }
-    let text;
-    let resumePath;
+    // Debug: show whether we received a buffer
+    console.log('DEBUG upload req.file keys =>', req.file ? Object.keys(req.file) : null);
 
-    // If file was uploaded to S3 (multer-s3), req.file.key is available
-    if (req.file && req.file.key) {
-      const params = { Bucket: process.env.S3_BUCKET, Key: req.file.key };
-      const obj = await s3.getObject(params).promise();
-      const buffer = obj.Body;
-      text = await parsePDF(buffer);
-      resumePath = req.file.location || `s3://${process.env.S3_BUCKET}/${req.file.key}`;
-    } else if (req.file && req.file.path) {
-      // Local disk fallback
-      text = await parsePDF(req.file.path);
-      resumePath = req.file.path;
-    } else {
-      throw new Error('No file uploaded');
+    if (!req.file || !req.file.buffer) {
+      throw new Error('No file uploaded or missing buffer');
     }
 
+    const buffer = req.file.buffer;
+    const text = await parsePDF(buffer);
     const jdText = req.body.jd;
-
     const result = calculateScore(text, jdText);
 
-    const candidate = await Candidate.create({
-      name: req.file.originalname,
-      score: result.score,
-      matchedSkills: result.matchedSkills,
-      missingSkills: result.missingSkills,
-      resumePath,
+    // Save file to MongoDB GridFS
+    const db = mongoose.connection.db;
+    const bucket = new mongoose.mongo.GridFSBucket(db, { bucketName: 'resumes' });
+
+    const uploadStream = bucket.openUploadStream(req.file.originalname, {
+      contentType: req.file.mimetype,
     });
 
-    res.json({
-      score: result.score,
-      matchedSkills: result.matchedSkills,
-      missingSkills: result.missingSkills,
-      candidate,
+    uploadStream.end(buffer);
+
+    uploadStream.on('error', (err) => {
+      console.error('GridFS upload error:', err && err.message);
+      return res.status(500).json({ error: 'Failed to store resume' });
+    });
+
+    uploadStream.on('finish', async (file) => {
+      try {
+        const resumePath = `gridfs:${file._id.toString()}`;
+        const candidate = await Candidate.create({
+          name: req.file.originalname,
+          score: result.score,
+          matchedSkills: result.matchedSkills,
+          missingSkills: result.missingSkills,
+          resumePath,
+        });
+
+        res.json({
+          score: result.score,
+          matchedSkills: result.matchedSkills,
+          missingSkills: result.missingSkills,
+          candidate,
+        });
+      } catch (err) {
+        res.status(500).json({ error: err.message });
+      }
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
